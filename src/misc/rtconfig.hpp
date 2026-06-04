@@ -17,9 +17,12 @@
 **/
 
 #pragma once
+#include <string>
 
 namespace shadertest {
-	typedef struct config_t {} config_t;
+	typedef struct config_t {
+		std::string shader_path = "";
+	} config_t;
 
 	config_t read_config_from_args(int argc, const char **argv);
 };

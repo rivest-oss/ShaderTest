@@ -21,6 +21,8 @@
 #include "Ox/include/nuclei.hpp"
 #include <string>
 #include <vector>
+#include <cstdio>
+#include <cstdarg>
 
 namespace Raylib {
 	#include <raylib.h>
@@ -28,16 +30,29 @@ namespace Raylib {
 
 const char *window_title = "Rivest's Shader Tester";
 
-const char *help_text = ""
-"Usage:\n"
-"\n"
-"F1  Open/close help screen.\n"
-"A   Go back time by 10 seconds.\n"
-"D   Advance time by 10 seconds.\n"
-"R   Force shader reload.\n"
-"F   Display number of frames per second.\n"
-"U   (Un)cap framerate.\n"
-"";
+const char *help_text[] = {
+	""
+	"Usage:\n"
+	"\n"
+	"F1  Open/close help screen.\n"
+	"A   Go back time by 10 seconds.\n"
+	"D   Advance time by 10 seconds.\n"
+	"R   Force shader reload.\n"
+	"F   Display number of frames per second.\n"
+	"U   (Un)cap framerate.\n"
+	"",
+
+	"OpenGL variables:\n"
+	"\n"
+	"uniform uint iScreenWidth\n"
+	"uniform uint iScreenHeight\n"
+	"uniform float iViewportX\n"
+	"uniform float iViewportY\n"
+	"uniform float iViewportZoom\n"
+	"uniform float iTime\n"
+	"uniform float iImage\n"
+	"",
+};
 
 const char *default_fragshader_src = ""
 	"#version 330 core\n"
@@ -93,7 +108,7 @@ std::string user_shader_path;
 
 bool user_pressed_paste = false;
 
-bool show_help = false;
+int show_help = -1;
 bool show_fps = false;
 bool cap_fps = true;
 
@@ -108,10 +123,51 @@ float user_view_offset_y = 0.0;
 float user_view_zoom = 0.0;
 Raylib::Texture2D user_texture;
 
+#ifndef SHADER_DONT_FOCUS_LOG
+	const bool user_focus_log = false;
+#else
+	const bool user_focus_log = true;
+#endif
+
+std::string user_error_log;
+
+std::string _tracelog_string;
+
+void trace_log_callback(int log_level, const char *text, std::va_list vlist) {
+	va_list vlist_copy;
+	va_copy(vlist_copy, vlist);
+
+	int rc = std::vsnprintf(nullptr, 0, text, vlist_copy);
+	ox_assert(rc >= 0, "'rc' shouldn't be less than zero... huh.");
+
+	va_end(vlist_copy);
+	
+	_tracelog_string.clear();
+	_tracelog_string.reserve(rc + 2);
+	
+	rc = std::vsnprintf((char *)_tracelog_string.data(), rc + 1, text, vlist);
+	ox_assert(rc >= 0, "'rc' shouldn't be less than zero... huh.");
+
+	va_end(vlist);
+
+	if(log_level != Raylib::LOG_ERROR) {
+		std::printf("%s\n", _tracelog_string.c_str());
+		_tracelog_string.clear();
+		return;
+	}
+	
+	user_error_log += _tracelog_string;
+	_tracelog_string.clear();
+	
+	if(user_focus_log)
+		show_help = -1;
+};
+
 int init(int argc, const char **argv) {
 	Ox::Error err;
 	
-	(void)shadertest::read_config_from_args(argc, argv);
+	shadertest::config_t config = shadertest::read_config_from_args(argc, argv);
+	user_shader_path = config.shader_path;
 	
 	Raylib::SetTargetFPS(60);
 	Raylib::SetExitKey(Raylib::KEY_NULL);
@@ -130,8 +186,8 @@ int init(int argc, const char **argv) {
 	
 	user_shader.id = 0;
 	user_shader.locs = nullptr;
-	user_shader_path = "";
-	show_help = show_fps = false;
+	show_fps = false;
+	show_help = -1;
 	cap_fps = true;
 	shader_mode = 0;
 
@@ -172,6 +228,9 @@ int init(int argc, const char **argv) {
 		if(Raylib::IsFontValid(default_font) == false)
 			default_font = Raylib::GetFontDefault();
 	}
+	
+	user_error_log.clear();
+	Raylib::SetTraceLogCallback(trace_log_callback);
 
 	return 0;
 };
@@ -190,15 +249,16 @@ void deinit(void) {
 	Raylib::CloseWindow();
 };
 
-void update_target_fps(void) {
-	int fps;
-	if(cap_fps)
-		fps = Raylib::GetMonitorRefreshRate(Raylib::GetCurrentMonitor());
-	else
-		fps = 999;
+int target_fps = 60;
 
-	if(fps < 1) fps = 1;
-	Raylib::SetTargetFPS(fps);
+void update_target_fps(void) {
+	if(cap_fps)
+		target_fps = Raylib::GetMonitorRefreshRate(Raylib::GetCurrentMonitor());
+	else
+		target_fps = 999;
+
+	if(target_fps < 1) target_fps = 1;
+	Raylib::SetTargetFPS(target_fps);
 };
 
 bool reload_shader = false;
@@ -262,8 +322,47 @@ void handle_dropped_files(void) {
 			continue;
 		}
 
-		user_shader_path = files.paths[i];
-		reload_shader = true;
+		if(Raylib::GetFileLength(files.paths[i]) < 1'048'576) {
+			int file_size;
+			Ox::u8 *data = Raylib::LoadFileData(files.paths[i], &file_size);
+
+			if(data != nullptr) {
+				if(file_size < 1'048'576) {
+					bool is_valid = true;
+					Ox::u8 *data_copy = data;
+
+					for(int i = 0; i < file_size; i++, data_copy++) {
+						Ox::u8 c = *data_copy;
+
+						if(
+							(c < 0x20
+							 && c != '\r'
+							 && c != '\n'
+							 && c != '\t'
+							 && c != '\x1b')
+							|| (c >= 0x7f
+							 && (c & 0b11100000) != 0b11000000
+							 && (c & 0b11110000) != 0b11100000
+							 && (c & 0b11111000) != 0b11110000)
+						) {
+							is_valid = false;
+							break;
+						}
+					};
+
+					if(is_valid) {
+						user_shader_path = files.paths[i];
+						reload_shader = true;
+
+						continue;
+					}
+				}
+
+				Raylib::UnloadFileData(data);
+			}
+		}
+
+		shadertest::log_fmt("User dropped some files, but I don't know how to handle them.\n");
 	};
 
 	Raylib::UnloadDroppedFiles(files);
@@ -316,7 +415,7 @@ void update(double dt) {
 		shader_mode = -1;
 
 	if(Raylib::IsKeyPressed(Raylib::KEY_F1))
-		show_help = show_help == false;
+		show_help++;
 	if(Raylib::IsKeyPressed(Raylib::KEY_A))
 		user_acc_time -= 10.;
 	if(Raylib::IsKeyPressed(Raylib::KEY_D))
@@ -459,6 +558,9 @@ void draw_text_fit(
 };
 
 void draw_help_screen(void) {
+	if(show_help > 1) show_help = -1;
+	if(show_help < 0) return;
+
 	Raylib::DrawRectangle(
 		user_screen_width * .1,
 		user_screen_height * .1,
@@ -478,9 +580,37 @@ void draw_help_screen(void) {
 		user_screen_width * 0.76,
 		user_screen_height * 0.76,
 		Raylib::WHITE,
-		help_text,
+		help_text[show_help],
 		default_font,
 		24.f
+	);
+};
+
+void draw_error_screen(void) {
+	if(shader_mode >= 0 || show_help >= 0) return;
+
+	Raylib::DrawRectangle(
+		user_screen_width * .05,
+		user_screen_height * .05,
+		user_screen_width * 0.7,
+		user_screen_height * 0.7,
+		Raylib::Color {
+			0x10,
+			0x10,
+			0x10,
+			0xc0,
+		}
+	);
+
+	draw_text_fit(
+		user_screen_width * .07,
+		user_screen_height * .07,
+		user_screen_width * 0.86,
+		user_screen_height * 0.86,
+		Raylib::LIGHTGRAY,
+		user_error_log.c_str(),
+		default_font,
+		20.f
 	);
 };
 
@@ -602,8 +732,9 @@ void draw(double dt) {
 
 	Raylib::EndShaderMode();
 
-	if(show_help)
-		draw_help_screen();
+	draw_help_screen();
+	draw_error_screen();
+
 	if(show_fps)
 		draw_fps();
 	

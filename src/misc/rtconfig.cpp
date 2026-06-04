@@ -58,6 +58,7 @@ namespace shadertest {
 
 	config_t read_config_from_args(int argc, const char **argv) {
 		config_t conf;
+		conf.shader_path = "";
 
 		for(int i = 1; i < argc; i++) {
 			if(
@@ -74,6 +75,11 @@ namespace shadertest {
 			) {
 				i_print_version();
 				std::exit(0);
+			}
+
+			if(argv[i][0] != '-' && conf.shader_path.size() < 1) {
+				conf.shader_path = argv[i];
+				continue;
 			}
 
 			std::fprintf(stderr, "Bad option: %s\n", argv[i]);
